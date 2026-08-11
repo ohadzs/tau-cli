@@ -381,10 +381,10 @@ def cmd_pniot(args):
     import browser_login
     user, id_number, pw = browser_credentials()
     if args.case == "new":
-        browser_login.new_inquiry(
-            user, id_number, pw,
-            wait=lambda: input("the new-inquiry form is open — fill and submit it "
-                               "in the browser, then press Enter here to close: "))
+        print("opening the new-inquiry form — fill and submit it there, "
+              "then close the window.", flush=True)
+        browser_login.new_inquiry(user, id_number, pw)
+        print("browser closed.")
         return
     out = browser_login.inquiries(user, id_number, pw, case=args.case,
                                   headless=not args.show)

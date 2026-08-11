@@ -165,12 +165,31 @@ def _rows(ft):
     return [{"number": c[0], "subject": c[1], "status": c[2]} for c in raw]
 
 
+def wait_for_close(ctx, poll_s=2, max_s=4 * 3600):
+    """Block until the user closes the browser. The default hold for `new_inquiry`.
+
+    Waiting on stdin only works from a terminal — backgrounded, `input()` hits EOF
+    and takes the window down with it mid-typing.
+    """
+    import time
+
+    deadline = time.monotonic() + max_s
+    while time.monotonic() < deadline:
+        try:
+            if not [p for p in ctx.pages if not p.is_closed()]:
+                return
+        except Exception:      # context already gone
+            return
+        time.sleep(poll_s)
+
+
 def new_inquiry(username, id_number, password, timeout_ms=60_000, wait=None):
     """Sign in and leave a *visible* browser sitting on the new-inquiry form.
 
     Filing is Ohad's to do: mail sent straight to a unit is rejected ("פנייתך
     נסגרה מכיוון שלא נפתחה דרך מערכת הפניות"), so the form is the only door, and
-    the submit button stays his. `wait` is called once the form is up.
+    the submit button stays his. `wait` is called once the form is up; by default
+    we simply hold until he closes the window.
     """
     from playwright.sync_api import sync_playwright
 
@@ -190,9 +209,12 @@ def new_inquiry(username, id_number, password, timeout_ms=60_000, wait=None):
             if not _click_leaf(ft, "פניה חדשה"):
                 raise LoginFailed(f"no 'פניה חדשה' button on {ft.url}")
             ft.wait_for_timeout(PNIOT_SETTLE_MS)
-            (wait or (lambda: None))()
+            (wait or (lambda: wait_for_close(ctx)))()
         finally:
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def inquiries(username, id_number, password, case=None,
