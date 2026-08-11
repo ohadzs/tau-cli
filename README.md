@@ -14,6 +14,7 @@ live bundle, so the tool doesn't rot when TAU redeploys.
 tau map [screen] [--json]     list screens + their JSON endpoints (no login needed)
 tau screen <name> [--show]    open a screen and dump the data it loads   ← the useful one
 tau login                     authenticate, cache the session
+tau pniot [number|new]        the inquiry system: list · read one · open the form
 tau probe <screen>            call every endpoint with empty inputs (usually rejected)
 tau call <path> <apiVersion> [--inputs JSON] [--view NAME]
 ```
@@ -28,6 +29,23 @@ then promote whatever is useful into a named command.
 tau map Tuition          # → DataActionGetPikuah, DataActionGetTuitionComponents, …
 tau probe Tuition        # → the actual numbers
 ```
+
+## The inquiry system (פניות)
+
+Anything you actually want from a unit goes through TAU's inquiry system — mail sent
+straight to a department bounces back closed ("פנייתך נסגרה מכיוון שלא נפתחה דרך מערכת
+הפניות"). It is **not** part of the OutSystems portal: it's a FormTitan app
+(`tau-int.formtitan.com/ftproject/crm_tau/`) that opens in a second tab, and it's a
+SPA — a direct URL to `/my_cases` bounces to Home, so `pniot` clicks its way in.
+
+```bash
+tau pniot              # every inquiry: number, status, subject
+tau pniot 02798350     # one case: the fields, what was sent, the correspondence
+tau pniot new          # opens a VISIBLE browser on the form — you fill and submit
+```
+
+`new` deliberately stops at the form: filing is the user's action, not the tool's.
+Replies are answered by finding the thread in your mailbox and replying there.
 
 ## Why a browser
 
@@ -70,7 +88,12 @@ cached session; every other command restores it and only re-authenticates when i
 
 - Setup needs Playwright: `uv venv .venv && uv pip install --python .venv/bin/python playwright
   && .venv/bin/python -m playwright install chromium`. Only the login path imports it — `map`
-  still runs on bare stdlib.
+  still runs on bare stdlib. With a venv, run the browser commands as `.venv/bin/python tau …`.
+- **Inquiry answers don't reach Gmail** once you have a university user — they go to the TAU
+  mailbox and the portal. `tau pniot <number>` is the fast way to see the status; the answer
+  text itself may only exist in the TAU mailbox.
+- `tau pniot`'s list shows what the portal's default tab shows (recent) — a case rejected
+  before it entered the system won't be there at all.
 - A welcome interstitial ("Got it, don't show again") sits in front of the login and swallows
   the redirect to the SSO; it has to be dismissed first.
 - The SPA holds a socket open, so `networkidle` never fires — waits are on a fixed settle.

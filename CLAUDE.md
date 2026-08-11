@@ -29,6 +29,18 @@ out of this repo.
 - **Bidding is a separate app** (`ims.tau.ac.il/Bidd/`, legacy ASP + JS frameset, its own login).
   Not covered. It's only live during a registration round, so reverse-engineer it during one.
 
+## The inquiry system is a second app
+
+`tau pniot` covers TAU's **מערכת פניות** — a **FormTitan** app (`tau-int.formtitan.com/
+ftproject/crm_tau/`), not OutSystems, reached by clicking the dashboard tile (it opens a
+second tab). It's a SPA: `goto('/my_cases')` bounces to Home, so the flow is click
+"הפניות שלי" → click the case number. Clicking a Power-Table row needs a **real mouse**
+(`locator.click()`); a synthetic `element.click()` from page JS silently does nothing.
+`pniot new` opens the form **headful** and stops — filing is Ohad's action, not the tool's.
+
+⚠️ Mail sent straight to a unit is auto-rejected ("לא נפתחה דרך מערכת הפניות"), and answers
+land in the TAU mailbox rather than Gmail — the portal is the only reliable read path.
+
 ## Screens worth knowing
 
 `Tuition`, `CourseGrades`, `WeeklySchedule`, `ExamsAndTasks`, `AcademicDashboard`,

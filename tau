@@ -357,17 +357,49 @@ def cmd_probe(args):
 def cmd_screen(args):
     """Open a portal screen in a headless browser and dump what it loaded."""
     import browser_login
+    user, id_number, pw = browser_credentials()
+    data = browser_login.screen(user, id_number, pw, args.route,
+                                headless=not args.show)
+    if not data:
+        raise TauError(f"{args.route} loaded nothing — check the name with `tau map`")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def browser_credentials():
+    """The three fields the SSO form wants, or a TauError saying what's missing."""
     user, pw = credentials()
     id_number = read_id_number()
     if not user or not pw:
         raise TauError(f"no credentials — see README ({KEYCHAIN_CREDS} in the Keychain)")
     if not id_number:
         raise TauError(f"the SSO needs an ID number; put it in {ID_FILE} (one line)")
-    data = browser_login.screen(user, id_number, pw, args.route,
-                                headless=not args.show)
-    if not data:
-        raise TauError(f"{args.route} loaded nothing — check the name with `tau map`")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return user, id_number, pw
+
+
+def cmd_pniot(args):
+    """List the inquiries (פניות), or print one with its correspondence."""
+    import browser_login
+    user, id_number, pw = browser_credentials()
+    if args.case == "new":
+        browser_login.new_inquiry(
+            user, id_number, pw,
+            wait=lambda: input("the new-inquiry form is open — fill and submit it "
+                               "in the browser, then press Enter here to close: "))
+        return
+    out = browser_login.inquiries(user, id_number, pw, case=args.case,
+                                  headless=not args.show)
+    if args.json:
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+        return
+    if args.case:
+        print(f"{out['number']}  {out['subject']}  [{out['status']}]\n")
+        print(out["detail"])
+        for mail in out["emails"]:
+            print("\n" + "-" * 60 + "\n" + mail)
+        return
+    for r in out:
+        print(f"{r['number']}  {r['status']:<26} {r['subject']}")
+    print(f"\n{len(out)} inquiries")
 
 
 def main():
@@ -397,6 +429,13 @@ def main():
     sp = sub.add_parser("probe", help="call every endpoint of a screen and dump the JSON")
     sp.add_argument("screen")
     sp.set_defaults(func=cmd_probe)
+
+    sp = sub.add_parser("pniot", help="the inquiry system (פניות): list, read one, or open a new one")
+    sp.add_argument("case", nargs="?",
+                    help="inquiry number (e.g. 02798350), or 'new' to open the form")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument("--show", action="store_true", help="run the browser visibly")
+    sp.set_defaults(func=cmd_pniot)
 
     args = p.parse_args()
     try:
