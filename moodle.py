@@ -7,7 +7,7 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py courses
     .venv/bin/python moodle.py pull <course-id> <dir> [--videos]
 
-`pull` keeps Moodle's section layout (one folder per section). Lecture videos run
+`pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 """
 
@@ -63,18 +63,36 @@ def courses(page):
 
 
 def course_files(ctx, page, course_id):
-    """-> [(section, pluginfile-url)] for every file resource on the course page."""
+    """-> [(section path, pluginfile-url)] for every file and folder on the course page."""
     page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
     items = page.evaluate("""() => [...document.querySelectorAll('li.activity')].map(a => {
-        const l = a.querySelector('a[href*="/mod/resource/"]');
         const s = a.closest('li.section,[data-for=section]');
+        const l = a.querySelector('a[href*="/mod/resource/"], a[href*="/mod/folder/"]');
         return {href: l ? l.href : '',
+                folder: a.classList.contains('modtype_folder'),
+                // inline folders have no .instancename: take the first plain text line
+                name: ((a.querySelector('.instancename,.activityname') || {}).innerText ||
+                       a.innerText.split('\\n').map(t => t.trim()).find(t => t &&
+                         !/סימון כבוצע|הורדת התיקייה|Mark as done|Download folder/.test(t) &&
+                         !/\\.[a-z0-9]{2,4}$/i.test(t)) || '').trim().split('\\n')[0],
+                inline: [...a.querySelectorAll('a[href*="pluginfile.php"]')].map(x => x.href),
                 sec: s ? ((s.querySelector('.sectionname,h3') || {}).innerText || '').trim() : ''};
-      }).filter(x => x.href)""")
+      })""")
     out, seen = [], set()
     for it in items:
-        if it["href"] in seen:
+        sec = (it["sec"] or "כללי").replace("/", "-")
+        if it["folder"]:
+            # A folder shown inline already lists its files; otherwise open its page.
+            links = it["inline"]
+            if not links and it["href"]:
+                html = ctx.request.get(it["href"]).text()
+                links = [m.replace("&amp;", "&") for m in
+                         re.findall(r'https://moodle\.tau\.ac\.il/pluginfile\.php/[^"\'<> ]+', html)]
+            name = re.sub(r"\s+", " ", it["name"]).replace("/", "-") or "תיקייה"
+            out += [(f"{sec}/{name}", u) for u in dict.fromkeys(links)]
+            continue
+        if not it["href"] or it["href"] in seen:
             continue
         seen.add(it["href"])
         r = ctx.request.get(it["href"], max_redirects=0)
@@ -84,7 +102,7 @@ def course_files(ctx, page, course_id):
             if not m:
                 continue
             url = m.group(0).replace("&amp;", "&")
-        out.append(((it["sec"] or "כללי").replace("/", "-"), url))
+        out.append((sec, url))
     return out
 
 
@@ -123,7 +141,7 @@ def main():
     # Download outside the browser: curl streams big files instead of buffering them.
     root = pathlib.Path(args.dir)
     for sec, url in files:
-        name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1])
+        name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
         if name.lower().endswith(VIDEO_EXT) and not args.videos:
             print(f"skip video\t{sec}/{name}")
             continue
