@@ -73,7 +73,7 @@ def screen(username, id_number, password, route,
     captured = {}
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        browser = pw.chromium.launch(headless=headless, channel="chrome")
         try:
             page = browser.new_context(locale="he-IL").new_page()
             _sign_in(page, username, id_number, password, timeout_ms)
@@ -104,7 +104,7 @@ def login_cookies(username, id_number, password, timeout_ms=60_000, headless=Tru
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        browser = pw.chromium.launch(headless=headless, channel="chrome")
         try:
             ctx = browser.new_context(locale="he-IL")
             page = ctx.new_page()
@@ -194,7 +194,7 @@ def new_inquiry(username, id_number, password, timeout_ms=60_000, wait=None):
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
+        browser = pw.chromium.launch(headless=False, channel="chrome")
         try:
             ctx = browser.new_context(locale="he-IL", no_viewport=True)
             page = ctx.new_page()
@@ -229,7 +229,7 @@ def inquiries(username, id_number, password, case=None,
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless)
+        browser = pw.chromium.launch(headless=headless, channel="chrome")
         try:
             ctx = browser.new_context(locale="he-IL")
             page = ctx.new_page()

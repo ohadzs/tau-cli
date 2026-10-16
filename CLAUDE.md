@@ -45,3 +45,16 @@ land in the TAU mailbox rather than Gmail — the portal is the only reliable re
 
 `Tuition`, `CourseGrades`, `WeeklySchedule`, `ExamsAndTasks`, `AcademicDashboard`,
 `StutiesPrograms`, `RequestsAndApprovals`, `StudentCard`. `tau map` lists all 60-odd.
+
+## Moodle is a third app
+
+`moodle.py` (`courses`, `pull <course-id> <dir> [--videos]`) covers `moodle.tau.ac.il`. Same
+NetIQ SSO, different form: `#Ecom_User_ID` (username, **not** the ID number) /
+`#Ecom_User_Pid` / `#Ecom_Password`. Course list = Moodle's own ajax
+`core_course_get_enrolled_courses_by_timeline_classification` with `M.cfg.sesskey`; files =
+resolve each `/mod/resource/` link to its `pluginfile.php` URL, then curl with the session
+cookies. Lecture videos are 0.3–0.7 GB each, so `pull` skips them by default.
+
+The username lives in `~/.config/tau/user`; `credentials()` reads the Keychain `tau` item for
+that account, because an older `tau` item keyed by ID number (stale password) can coexist.
+Playwright drives the system Chrome (`channel="chrome"`), not its own bundled Chromium.

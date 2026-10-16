@@ -29,6 +29,7 @@ KEYCHAIN_SESSION = "tau-session"  # cached {cookie, csrf} blob
 SSO_SERVERS = ("nidp.tau.ac.il", "my.tau.ac.il")  # fallback: a browser-saved login
 ID_FILE = "~/.config/tau/id"
 ID_FILE_PATH = pathlib.Path(ID_FILE).expanduser()
+USER_FILE_PATH = pathlib.Path("~/.config/tau/user").expanduser()
 
 
 class TauError(Exception):
@@ -37,14 +38,15 @@ class TauError(Exception):
 
 # ---------------------------------------------------------------- keychain
 
-def keychain_get(service):
+def keychain_get(service, account=None):
     """-> (account, password) or (None, None) if the item isn't seeded."""
+    acct = ["-a", account] if account else []
     try:
         meta = subprocess.run(
-            ["security", "find-generic-password", "-s", service],
+            ["security", "find-generic-password", "-s", service, *acct],
             capture_output=True, text=True, check=True).stdout
         pw = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-w"],
+            ["security", "find-generic-password", "-s", service, *acct, "-w"],
             capture_output=True, text=True, check=True).stdout.strip()
     except subprocess.CalledProcessError:
         return None, None
@@ -73,7 +75,9 @@ def keychain_get_internet(server):
 
 def credentials():
     """The portal login, from the Keychain. Never printed, never passed in argv."""
-    user, pw = keychain_get(KEYCHAIN_CREDS)
+    # Several `tau` items can exist (an old one keyed by ID number); the username
+    # file names the live one.
+    user, pw = keychain_get(KEYCHAIN_CREDS, read_username() or None)
     if user and pw:
         return user, pw
     # TAU's SSO is the same account for students — reuse a saved browser login if
@@ -83,6 +87,14 @@ def credentials():
         if user and pw:
             return user, pw
     return None, None
+
+
+def read_username():
+    """The SSO username (e.g. from the account-activation mail), one line."""
+    try:
+        return USER_FILE_PATH.read_text().strip()
+    except OSError:
+        return ""
 
 
 def read_id_number():
