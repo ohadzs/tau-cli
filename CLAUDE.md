@@ -58,3 +58,10 @@ cookies. Lecture videos are 0.3–0.7 GB each, so `pull` skips them by default.
 The username lives in `~/.config/tau/user`; `credentials()` reads the Keychain `tau` item for
 that account, because an older `tau` item keyed by ID number (stale password) can coexist.
 Playwright drives the system Chrome (`channel="chrome"`), not its own bundled Chromium.
+
+**Daily sync on zima1** (clone `/home/ohad/tau-cli`): cron 06:00 runs `moodle-sync.sh` =
+`moodle.py sync data/moodle` (every course, new files only, no videos) + `rclone copy` to Drive
+`אוניברסיטה/` (never deletes). Off macOS the password comes from `~/.config/tau/password` (600).
+A failed login drops `~/.config/tau/login-blocked` and every later run refuses to log in until
+it's removed — the lockout guard. Failure → Telegram DM. The tool only ever opens
+`/mod/resource/` and `/mod/folder/` links — never quiz/assign pages; keep it that way.
