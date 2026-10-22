@@ -70,14 +70,15 @@ def courses(page):
 
 
 def course_files(ctx, page, course_id):
-    """-> [(section path, pluginfile-url)] for every file and folder on the course page."""
+    """-> [(section path, pluginfile-url)] for every file, folder and assignment attachment on the course page."""
     page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
     items = page.evaluate("""() => [...document.querySelectorAll('li.activity')].map(a => {
         const s = a.closest('li.section,[data-for=section]');
-        const l = a.querySelector('a[href*="/mod/resource/"], a[href*="/mod/folder/"]');
+        const l = a.querySelector('a[href*="/mod/resource/"], a[href*="/mod/folder/"], a[href*="/mod/assign/"]');
         return {href: l ? l.href : '',
-                folder: a.classList.contains('modtype_folder'),
+                // an assignment's attachments sit on its page, like a folder's files
+                folder: a.classList.contains('modtype_folder') || a.classList.contains('modtype_assign'),
                 // inline folders have no .instancename: take the first plain text line
                 name: ((a.querySelector('.instancename,.activityname') || {}).innerText ||
                        a.innerText.split('\\n').map(t => t.trim()).find(t => t &&
