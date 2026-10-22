@@ -30,6 +30,8 @@ SSO_SERVERS = ("nidp.tau.ac.il", "my.tau.ac.il")  # fallback: a browser-saved lo
 ID_FILE = "~/.config/tau/id"
 ID_FILE_PATH = pathlib.Path(ID_FILE).expanduser()
 USER_FILE_PATH = pathlib.Path("~/.config/tau/user").expanduser()
+# Linux boxes (zima1) have no Keychain: the password sits in a chmod-600 file instead.
+PASSWORD_FILE_PATH = pathlib.Path("~/.config/tau/password").expanduser()
 
 
 class TauError(Exception):
@@ -48,7 +50,7 @@ def keychain_get(service, account=None):
         pw = subprocess.run(
             ["security", "find-generic-password", "-s", service, *acct, "-w"],
             capture_output=True, text=True, check=True).stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):  # no `security` off macOS
         return None, None
     m = re.search(r'"acct"<blob>="([^"]*)"', meta)
     return (m.group(1) if m else None), pw
@@ -67,7 +69,7 @@ def keychain_get_internet(server):
         pw = subprocess.run(
             ["security", "find-internet-password", "-s", server, "-w"],
             capture_output=True, text=True, check=True).stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):  # no `security` off macOS
         return None, None
     m = re.search(r'"acct"<blob>="([^"]*)"', meta)
     return (m.group(1) if m else None), pw
@@ -86,7 +88,10 @@ def credentials():
         user, pw = keychain_get_internet(server)
         if user and pw:
             return user, pw
-    return None, None
+    try:
+        return read_username() or None, PASSWORD_FILE_PATH.read_text().strip() or None
+    except OSError:
+        return None, None
 
 
 def read_username():

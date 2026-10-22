@@ -6,7 +6,10 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
 
     .venv/bin/python moodle.py courses
     .venv/bin/python moodle.py pull <course-id> <dir> [--videos]
+    .venv/bin/python moodle.py sync <dir> [--videos]
 
+`sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
+there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 """
@@ -106,12 +109,39 @@ def course_files(ctx, page, course_id):
     return out
 
 
+def course_dir_name(course):
+    """'0321110001 - אלגברה לינארית לפיזיקה' -> 'אלגברה לינארית לפיזיקה' (the Drive folder name)."""
+    return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
+
+
+def download(files, root, cookie, videos=False, skip_existing=False):
+    """Download outside the browser: curl streams big files instead of buffering them. -> #failed"""
+    failed = 0
+    for sec, url in files:
+        name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
+        if name.lower().endswith(VIDEO_EXT) and not videos:
+            if not skip_existing:  # the daily sync would repeat this every morning
+                print(f"skip video\t{sec}/{name}")
+            continue
+        dest = root / sec / name
+        if skip_existing and dest.exists() and dest.stat().st_size:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        ok = subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(dest), url]).returncode == 0
+        failed += not ok
+        print(f"{'ok' if ok else 'FAIL'}\t{sec}/{name}")
+    return failed
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("courses")
     p = sub.add_parser("pull")
     p.add_argument("course_id")
+    p.add_argument("dir")
+    p.add_argument("--videos", action="store_true")
+    p = sub.add_parser("sync")
     p.add_argument("dir")
     p.add_argument("--videos", action="store_true")
     args = ap.parse_args()
@@ -124,7 +154,8 @@ def main():
 
     from playwright.sync_api import sync_playwright
     with sync_playwright() as pwr:
-        browser = pwr.chromium.launch(headless=True, channel="chrome")
+        # System Chrome on the Mac; playwright's own Chromium on Linux (zima1 has no Chrome).
+        browser = pwr.chromium.launch(headless=True, channel="chrome" if sys.platform == "darwin" else None)
         try:
             ctx = browser.new_context(locale="he-IL")
             page = ctx.new_page()
@@ -133,23 +164,18 @@ def main():
                 for c in courses(page):
                     print(f'{c["id"]}\t{c["fullname"]}\t{c.get("coursecategory", "")}')
                 return
-            files = course_files(ctx, page, args.course_id)
+            if args.cmd == "sync":
+                todo = [(course_dir_name(c), course_files(ctx, page, c["id"])) for c in courses(page)]
+            else:
+                todo = [("", course_files(ctx, page, args.course_id))]
             cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
         finally:
             browser.close()
 
-    # Download outside the browser: curl streams big files instead of buffering them.
     root = pathlib.Path(args.dir)
-    for sec, url in files:
-        name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
-        if name.lower().endswith(VIDEO_EXT) and not args.videos:
-            print(f"skip video\t{sec}/{name}")
-            continue
-        dest = root / sec / name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        ok = subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(dest), url]).returncode == 0
-        print(f"{'ok' if ok else 'FAIL'}\t{sec}/{name}")
-
+    failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync")
+                 for sub_dir, files in todo)
+    sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
     main()
