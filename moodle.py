@@ -28,6 +28,9 @@ HERE = pathlib.Path(__file__).resolve().parent
 SSO_START = "https://moodle.tau.ac.il/2026/auth/saml2/login.php"
 COURSE_URL = "https://moodle.tau.ac.il/course/view.php?id={}"
 VIDEO_EXT = (".mp4", ".mov", ".m4v", ".webm")
+# Set by a failed login, so a daily cron can't keep hammering a wrong password into a lockout.
+# Delete it once the password is fixed.
+LOGIN_BLOCK = pathlib.Path("~/.config/tau/login-blocked").expanduser()
 
 
 def _tau():
@@ -47,6 +50,7 @@ def sign_in(page, user, id_number, password):
     page.press("#Ecom_Password", "Enter")
     page.wait_for_timeout(10_000)
     if "nidp" in page.url:
+        LOGIN_BLOCK.touch()
         sys.exit("Moodle login failed (wrong credentials?) — stop before retrying: lockout risk")
 
 
@@ -146,6 +150,8 @@ def main():
     p.add_argument("--videos", action="store_true")
     args = ap.parse_args()
 
+    if LOGIN_BLOCK.exists():
+        sys.exit(f"last Moodle login failed — fix the password, then rm {LOGIN_BLOCK}")
     tau = _tau()
     user, pw = tau.credentials()
     idn = tau.read_id_number()
