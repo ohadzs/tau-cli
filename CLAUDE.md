@@ -65,3 +65,7 @@ Playwright drives the system Chrome (`channel="chrome"`), not its own bundled Ch
 A failed login drops `~/.config/tau/login-blocked` and every later run refuses to log in until
 it's removed — the lockout guard. Failure → Telegram DM. The tool only ever opens
 `/mod/resource/` and `/mod/folder/` links — never quiz/assign pages; keep it that way.
+In the same login `sync` also writes `data/moodle-deadlines.json` — every assignment due date from
+Moodle's own calendar ajax (`core_calendar_get_calendar_monthly_view`, read-only; an event with no
+`action` = already submitted) — and appends each newly fetched file to `data/moodle-new.jsonl`. Both
+feed the study page's sync (ohadzvishaboo `sync/study_sync.py`, cron on zima1).

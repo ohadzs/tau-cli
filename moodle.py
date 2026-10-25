@@ -9,7 +9,10 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py sync <dir> [--videos]
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
-there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive.
+there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
+writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's submitted) and appends
+each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
+sync/study_sync.py) reads both.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 """
@@ -114,13 +117,54 @@ def course_files(ctx, page, course_id):
     return out
 
 
+def call(page, method, args):
+    """One Moodle ajax web-service call (the ones the site's own JS uses) -> its data."""
+    res = page.evaluate("""async ([m, a]) => {
+      const r = await fetch(M.cfg.wwwroot + '/lib/ajax/service.php?sesskey=' + M.cfg.sesskey, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify([{index: 0, methodname: m, args: a}])});
+      return await r.json();
+    }""", [method, args])[0]
+    if res.get("error"):
+        raise RuntimeError(json.dumps(res, ensure_ascii=False)[:300])
+    return res["data"]
+
+
+def course_code(course):
+    """'0321110001 - …' -> '0321-1100' (the TAU course number, as in the timetable and the calendar)."""
+    d = re.match(r"\d{8}", course["fullname"])
+    return f"{d.group(0)[:4]}-{d.group(0)[4:]}" if d else ""
+
+
+def deadlines(page):
+    """Every assignment due date from ~4 months back to ~5 ahead, from Moodle's calendar (read-only).
+    An assignment still waiting for a submission carries an 'action'; a submitted one doesn't."""
+    import datetime
+    today = datetime.date.today()   # ~a semester back and forward; months outside it don't change any more
+    first, last = (today - datetime.timedelta(days=120)).replace(day=1), today + datetime.timedelta(days=150)
+    out, y, m = {}, first.year, first.month
+    while (y, m) <= (last.year, last.month):
+        for w in call(page, "core_calendar_get_calendar_monthly_view", {"year": y, "month": m})["weeks"]:
+            for d in w["days"]:
+                for e in d["events"]:
+                    if e.get("modulename") != "assign" or e.get("eventtype") != "due":
+                        continue
+                    out[e["id"]] = {"id": e["id"], "instance": e["instance"], "name": e.get("activityname") or e["name"],
+                                    "due": e["timestart"], "url": e.get("url", ""), "course": e["course"]["id"],
+                                    "submitted": not e.get("action")}
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return sorted(out.values(), key=lambda a: a["due"])
+
+
 def course_dir_name(course):
     """'0321110001 - אלגברה לינארית לפיזיקה' -> 'אלגברה לינארית לפיזיקה' (the Drive folder name)."""
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
 
 
-def download(files, root, cookie, videos=False, skip_existing=False):
-    """Download outside the browser: curl streams big files instead of buffering them. -> #failed"""
+def download(files, root, cookie, videos=False, skip_existing=False, log=None):
+    """Download outside the browser: curl streams big files instead of buffering them. -> #failed
+    log: a .jsonl path — each file fetched is appended there ({at, path, url}, path relative to its parent)."""
+    import time
     failed = 0
     for sec, url in files:
         name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
@@ -135,6 +179,10 @@ def download(files, root, cookie, videos=False, skip_existing=False):
         ok = subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(dest), url]).returncode == 0
         failed += not ok
         print(f"{'ok' if ok else 'FAIL'}\t{sec}/{name}")
+        if ok and log:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"at": time.strftime("%Y-%m-%d %H:%M"), "path": str(dest.relative_to(root.parent)),
+                                    "url": url}, ensure_ascii=False) + "\n")
     return failed
 
 
@@ -172,7 +220,16 @@ def main():
                     print(f'{c["id"]}\t{c["fullname"]}\t{c.get("coursecategory", "")}')
                 return
             if args.cmd == "sync":
-                todo = [(course_dir_name(c), course_files(ctx, page, c["id"])) for c in courses(page)]
+                cs = courses(page)
+                todo = [(course_dir_name(c), course_files(ctx, page, c["id"])) for c in cs]
+                try:  # never let the deadlines side-trip cost the file sync
+                    meta = {"at": int(__import__("time").time()),
+                            "courses": [{"id": c["id"], "code": course_code(c), "dir": course_dir_name(c)} for c in cs],
+                            "assignments": deadlines(page)}
+                    out = pathlib.Path(args.dir).parent / "moodle-deadlines.json"
+                    out.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+                except Exception as e:
+                    print(f"deadlines FAIL\t{e}")
             else:
                 todo = [("", course_files(ctx, page, args.course_id))]
             cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
@@ -180,7 +237,8 @@ def main():
             browser.close()
 
     root = pathlib.Path(args.dir)
-    failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync")
+    log = root.parent / "moodle-new.jsonl" if args.cmd == "sync" else None
+    failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync", log=log)
                  for sub_dir, files in todo)
     sys.exit(1 if failed else 0)
 
