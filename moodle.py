@@ -12,7 +12,8 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
 there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
 writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's submitted) and appends
 each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
-sync/study_sync.py) reads both.
+sync/study_sync.py) reads both. It also writes <dir>/../moodle-zoom.json: every meeting in each course's
+Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 """
@@ -156,6 +157,46 @@ def deadlines(page):
     return sorted(out.values(), key=lambda a: a["due"])
 
 
+def zoom(page, course_id):
+    """Every Zoom meeting listed in the course's Zoom LTI activity (the "ZOOM" link on the course page).
+    The LTI page (applications.zoom.us/lti/rich) fetches its Upcoming list as JSON from its own API, so
+    catch that response and page through the rest the same way. occurrenceId is the start in epoch ms
+    (startTime is UTC); recurring meetings with no fixed time have neither. joinUrl carries the passcode
+    (pwd=), so it joins directly."""
+    import datetime
+    page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
+    page.wait_for_timeout(3000)
+    ltis = page.evaluate("""() => [...new Set([...document.querySelectorAll('a[href*="/mod/lti/view.php"]')]
+        .filter(a => /zoom/i.test(a.innerText)).map(a => new URL(a.href).searchParams.get('id')))]""")
+    out = []
+    for lti in ltis:
+        with page.expect_response(lambda r: "/lti/rich/meeting/upComing/" in r.url, timeout=60_000) as resp:
+            page.goto(f"https://moodle.tau.ac.il/mod/lti/launch.php?id={lti}", wait_until="domcontentloaded")
+        first = resp.value
+        res = first.json()["result"]
+        rows = list(res["list"])
+        for n in range(2, -(-res["total"] // res["pageSize"]) + 1):
+            url = re.sub(r"([?&])page=\d+", rf"\g<1>page={n}", first.url)
+            # replay the page's own request (its headers carry Zoom's anti-CSRF token)
+            try:
+                more = page.context.request.get(url, headers={k: v for k, v in first.request.all_headers().items()
+                                                              if not k.startswith(":")})
+                body = more.json()
+                rows += body["result"]["list"]
+            except Exception as e:  # keep the pages already in hand
+                print(f"zoom page {n} FAIL\t{course_id}\t{e}")
+                break
+        for m in rows:
+            start = None
+            if m.get("occurrenceId"):
+                start = int(m["occurrenceId"]) // 1000
+            elif m.get("startTime"):
+                start = int(datetime.datetime.fromisoformat(m["startTime"]).replace(tzinfo=datetime.timezone.utc).timestamp())
+            out.append({"lti": int(lti), "topic": m.get("topic", ""), "number": m.get("meetingNumber", ""),
+                        "start": start, "duration": m.get("duration", 0), "join_url": m.get("joinUrl", "")})
+    return out
+
+
 def course_dir_name(course):
     """'0321110001 - אלגברה לינארית לפיזיקה' -> 'אלגברה לינארית לפיזיקה' (the Drive folder name)."""
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
@@ -230,6 +271,17 @@ def main():
                     out.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception as e:
                     print(f"deadlines FAIL\t{e}")
+                zm = []
+                for c in cs:  # same: a Zoom page that won't load costs only its own course
+                    try:
+                        zm.append({"id": c["id"], "code": course_code(c), "dir": course_dir_name(c),
+                                   "meetings": zoom(page, c["id"])})
+                    except Exception as e:
+                        print(f"zoom FAIL\t{c['id']}\t{e}")
+                if zm:
+                    out = pathlib.Path(args.dir).parent / "moodle-zoom.json"
+                    out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": zm},
+                                              ensure_ascii=False, indent=1), encoding="utf-8")
             else:
                 todo = [("", course_files(ctx, page, args.course_id))]
             cookie = "; ".join(f"{c['name']}={c['value']}" for c in ctx.cookies())
