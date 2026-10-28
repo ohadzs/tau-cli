@@ -7,6 +7,7 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py courses
     .venv/bin/python moodle.py pull <course-id> <dir> [--videos]
     .venv/bin/python moodle.py sync <dir> [--videos]
+    .venv/bin/python moodle.py recordings [course]
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
 there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
@@ -16,6 +17,8 @@ sync/study_sync.py) reads both. It also writes <dir>/../moodle-zoom.json: every 
 Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
+`recordings` reads the Panopto block on each course page live (lecture + recitation recordings, title + viewer link);
+[course] = part of the course name or number.
 """
 
 import argparse
@@ -209,6 +212,19 @@ def zoom(page, course_id):
     return out
 
 
+def recordings(page, course_id):
+    """Every recording in the course page's Panopto block ("הקלטות הקורס בשרת הוידאו Panopto"), as
+    (title, viewer URL). The block loads by AJAX after the page, and keeps all sessions in the DOM even
+    the ones folded under "תצוגה מלאה"."""
+    page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
+    try:
+        page.wait_for_selector('a[href*="panopto"][href*="Viewer.aspx"]', timeout=20_000)
+    except Exception:
+        return []
+    return page.evaluate("""() => [...new Map([...document.querySelectorAll('a[href*="Viewer.aspx"]')]
+        .map(a => [a.href, a.innerText.trim()])).entries()].map(([u, t]) => [t, u])""")
+
+
 def course_dir_name(course):
     """'0321110001 - אלגברה לינארית לפיזיקה' -> 'אלגברה לינארית לפיזיקה' (the Drive folder name)."""
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
@@ -250,6 +266,8 @@ def main():
     p = sub.add_parser("sync")
     p.add_argument("dir")
     p.add_argument("--videos", action="store_true")
+    p = sub.add_parser("recordings")
+    p.add_argument("course", nargs="?", default="")
     args = ap.parse_args()
 
     if LOGIN_BLOCK.exists():
@@ -271,6 +289,12 @@ def main():
             if args.cmd == "courses":
                 for c in courses(page):
                     print(f'{c["id"]}\t{c["fullname"]}\t{c.get("coursecategory", "")}')
+                return
+            if args.cmd == "recordings":
+                for c in courses(page):
+                    if args.course in c["fullname"]:
+                        for title, url in recordings(page, c["id"]):
+                            print(f"{course_dir_name(c)}\t{title}\t{url}")
                 return
             if args.cmd == "sync":
                 cs = courses(page)
