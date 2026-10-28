@@ -139,7 +139,8 @@ def course_code(course):
 
 def deadlines(page):
     """Every assignment due date from ~4 months back to ~5 ahead, from Moodle's calendar (read-only).
-    An assignment still waiting for a submission carries an 'action'; a submitted one doesn't."""
+    An assignment still waiting for a submission carries an 'action'; a submitted one doesn't — but neither
+    does one not yet open to him, so a missing action is checked on the assignment page."""
     import datetime
     today = datetime.date.today()   # ~a semester back and forward; months outside it don't change any more
     first, last = (today - datetime.timedelta(days=120)).replace(day=1), today + datetime.timedelta(days=150)
@@ -154,7 +155,18 @@ def deadlines(page):
                                     "due": e["timestart"], "url": e.get("url", ""), "course": e["course"]["id"],
                                     "submitted": not e.get("action")}
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    # No action also means "not open to you yet" (hidden / restricted) — confirm on the assignment's own page
+    for a in out.values():
+        if a["submitted"] and a["url"]:
+            a["submitted"] = submitted(page, a["url"])
     return sorted(out.values(), key=lambda a: a["due"])
+
+
+def submitted(page, url):
+    """Read-only look at mod/assign/view.php: Moodle marks a handed-in attempt with the
+    'submissionstatussubmitted' class on the status cell (any language)."""
+    r = page.context.request.get(url)
+    return r.ok and "submissionstatussubmitted" in r.text()
 
 
 def zoom(page, course_id):
