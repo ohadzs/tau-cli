@@ -15,6 +15,8 @@ writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's 
 each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
 sync/study_sync.py) reads both. It also writes <dir>/../moodle-zoom.json: every meeting in each course's
 Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it.
+Files Ohad deleted on purpose (e.g. a superseded homework sheet) are listed in <dir>/../moodle-removed.txt,
+one path per line relative to <dir> — sync never fetches them again.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 `recordings` reads the Panopto block on each course page live (lecture + recitation recordings, title + viewer link);
@@ -230,7 +232,7 @@ def course_dir_name(course):
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
 
 
-def download(files, root, cookie, videos=False, skip_existing=False, log=None):
+def download(files, root, cookie, videos=False, skip_existing=False, log=None, removed=()):
     """Download outside the browser: curl streams big files instead of buffering them. -> #failed
     log: a .jsonl path — each file fetched is appended there ({at, path, url}, path relative to its parent)."""
     import time
@@ -242,7 +244,7 @@ def download(files, root, cookie, videos=False, skip_existing=False, log=None):
                 print(f"skip video\t{sec}/{name}")
             continue
         dest = root / sec / name
-        if skip_existing and dest.exists() and dest.stat().st_size:
+        if dest in removed or skip_existing and dest.exists() and dest.stat().st_size:
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         ok = subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(dest), url]).returncode == 0
@@ -326,7 +328,11 @@ def main():
 
     root = pathlib.Path(args.dir)
     log = root.parent / "moodle-new.jsonl" if args.cmd == "sync" else None
-    failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync", log=log)
+    rm_list = root.parent / "moodle-removed.txt"
+    removed = {root / l.strip() for l in rm_list.read_text(encoding="utf-8").splitlines() if l.strip()} \
+        if args.cmd == "sync" and rm_list.exists() else set()
+    failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync", log=log,
+                          removed=removed)
                  for sub_dir, files in todo)
     sys.exit(1 if failed else 0)
 
