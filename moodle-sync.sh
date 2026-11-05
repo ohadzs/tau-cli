@@ -16,6 +16,13 @@ python3 moodle.py sync "$LOCAL" || fail="moodle.py sync exited $?"
 out=$("$RCLONE" copy "$LOCAL" "$DEST" --stats-one-line -v 2>&1) \
   || fail="${fail:+$fail; }rclone copy failed"
 grep -E "Copied|ERROR" <<<"$out" || true
+# Drive file ids, so the homework list can link straight to a sheet. Not worth failing the sync over.
+drive_map="$LOCAL/../moodle-drive.json"
+if "$RCLONE" lsjson -R --files-only "$DEST" > "$drive_map.tmp" 2>/dev/null; then
+  mv "$drive_map.tmp" "$drive_map"
+else
+  rm -f "$drive_map.tmp"
+fi
 if [ -n "$fail" ]; then
   echo "FAILED: $fail"
   ~/bin/tg-notify "Moodle → Drive failed" "$fail — see ~/tau-cli/data/moodle-sync.log on zima1"

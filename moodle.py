@@ -11,7 +11,8 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
 there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
-writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's submitted) and appends
+writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's submitted, its sheet, and
+'no_box': homework sheets posted before any submission box exists) and appends
 each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
 sync/study_sync.py) reads both. It also writes <dir>/../moodle-zoom.json: every meeting in each course's
 Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it.
@@ -78,8 +79,18 @@ def courses(page):
     return res["data"]["courses"]
 
 
-def course_files(ctx, page, course_id):
-    """-> [(section path, pluginfile-url)] for every file, folder and assignment attachment on the course page."""
+# A homework sheet posted as a file: "תרגיל בית 2", "שיעורי בית 3" — never "פתרון …" or "תרגול …".
+SHEET = re.compile(r"^(?:תרגיל(?:\s+בית)?|שיעורי\s+בית|גיליון)\s*(\d+)\s*$")
+
+
+def file_name(url):
+    return urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
+
+
+def course_files(ctx, page, course_id, sheets=None):
+    """-> [(section path, pluginfile-url)] for every file, folder and assignment attachment on the course page.
+    sheets: a list to append this course's homework sheets to ({number, name, url, path, box}, path relative
+    to the course folder; box = the sheet is attached to the submission box itself)."""
     page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
     items = page.evaluate("""() => [...document.querySelectorAll('li.activity')].map(a => {
@@ -88,6 +99,7 @@ def course_files(ctx, page, course_id):
         return {href: l ? l.href : '',
                 // an assignment's attachments sit on its page, like a folder's files
                 folder: a.classList.contains('modtype_folder') || a.classList.contains('modtype_assign'),
+                assign: a.classList.contains('modtype_assign'),
                 // inline folders have no .instancename: take the first plain text line
                 name: ((a.querySelector('.instancename,.activityname') || {}).innerText ||
                        a.innerText.split('\\n').map(t => t.trim()).find(t => t &&
@@ -108,6 +120,11 @@ def course_files(ctx, page, course_id):
                          re.findall(r'https://moodle\.tau\.ac\.il/pluginfile\.php/[^"\'<> ]+', html)]
             name = re.sub(r"\s+", " ", it["name"]).replace("/", "-") or "תיקייה"
             out += [(f"{sec}/{name}", u) for u in dict.fromkeys(links)]
+            num = re.search(r"\d+", name)
+            mine = [u for u in links if "assignsubmission" not in u]   # not his own hand-in
+            if it["assign"] and num and mine and sheets is not None:
+                sheets.append({"number": int(num.group()), "name": name, "url": it["href"], "box": True,
+                               "path": f"{sec}/{name}/{file_name(mine[0])}"})
             continue
         if not it["href"] or it["href"] in seen:
             continue
@@ -120,7 +137,30 @@ def course_files(ctx, page, course_id):
                 continue
             url = m.group(0).replace("&amp;", "&")
         out.append((sec, url))
+        m = SHEET.match(it["name"].strip())
+        if m and sheets is not None:
+            sheets.append({"number": int(m.group(1)), "name": it["name"].strip(), "url": it["href"], "box": False,
+                           "path": f"{sec}/{file_name(url)}"})
     return out
+
+
+def match_sheets(assignments, sheets):
+    """Pair each submission box with its sheet (same course + number): sets a["sheet"] = {number, path, url}.
+    -> the sheets no box was opened for yet, which Moodle's calendar can't show."""
+    by_key = {}
+    for s in sorted(sheets, key=lambda s: s["box"]):   # a sheet file on the page wins over a box attachment
+        by_key.setdefault((s["course"], s["number"]), s)
+    boxed = set()
+    for a in assignments:
+        num = re.search(r"\d+", a["name"])
+        if not num:
+            continue
+        key = (a["course"], int(num.group()))
+        boxed.add(key)
+        if key in by_key:
+            s = by_key[key]
+            a["sheet"] = {"number": s["number"], "path": s["path"], "url": s["url"]}
+    return [s for k, s in by_key.items() if k not in boxed]
 
 
 def call(page, method, args):
@@ -238,7 +278,7 @@ def download(files, root, cookie, videos=False, skip_existing=False, log=None, r
     import time
     failed = 0
     for sec, url in files:
-        name = urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
+        name = file_name(url)
         if name.lower().endswith(VIDEO_EXT) and not videos:
             if not skip_existing:  # the daily sync would repeat this every morning
                 print(f"skip video\t{sec}/{name}")
@@ -300,11 +340,17 @@ def main():
                 return
             if args.cmd == "sync":
                 cs = courses(page)
-                todo = [(course_dir_name(c), course_files(ctx, page, c["id"])) for c in cs]
+                todo, sheets = [], []
+                for c in cs:
+                    found = []
+                    todo.append((course_dir_name(c), course_files(ctx, page, c["id"], found)))
+                    sheets += [{**s, "course": c["id"], "path": f"{course_dir_name(c)}/{s['path']}"} for s in found]
                 try:  # never let the deadlines side-trip cost the file sync
+                    assignments = deadlines(page)
                     meta = {"at": int(__import__("time").time()),
                             "courses": [{"id": c["id"], "code": course_code(c), "dir": course_dir_name(c)} for c in cs],
-                            "assignments": deadlines(page)}
+                            "no_box": match_sheets(assignments, sheets),
+                            "assignments": assignments}
                     out = pathlib.Path(args.dir).parent / "moodle-deadlines.json"
                     out.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception as e:
