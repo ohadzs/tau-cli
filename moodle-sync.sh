@@ -16,6 +16,9 @@ python3 moodle.py sync "$LOCAL" || fail="moodle.py sync exited $?"
 out=$("$RCLONE" copy "$LOCAL" "$DEST" --stats-one-line -v 2>&1) \
   || fail="${fail:+$fail; }rclone copy failed"
 grep -E "Copied|ERROR" <<<"$out" || true
+# Transcripts are made by hand and live only in Drive: copy them down so the course-file tools can read them.
+# One way and adds only. Keeps Drive's timestamps, so the upload above sees nothing new.
+"$RCLONE" copy "$DEST" "$LOCAL" --include "*תמלול*" 2>&1 | grep -E "ERROR" || true
 # Drive file ids, so the homework list can link straight to a sheet. Not worth failing the sync over.
 drive_map="$LOCAL/../moodle-drive.json"
 if "$RCLONE" lsjson -R --files-only "$DEST" > "$drive_map.tmp" 2>/dev/null; then
