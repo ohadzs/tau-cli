@@ -10,7 +10,8 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py recordings [course]
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
-there yet — the daily zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
+there yet, or that the lecturer replaced under the same name (the old copy goes to
+<dir>/../moodle-replaced/) — the zima1 cron runs it, then rclone copies <dir> to Drive. In the same session it
 writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's submitted, its sheet, and
 'no_box': homework sheets posted before any submission box exists) and appends
 each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
@@ -28,6 +29,7 @@ import argparse
 import importlib.machinery
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -272,9 +274,56 @@ def course_dir_name(course):
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
 
 
-def download(files, root, cookie, videos=False, skip_existing=False, log=None, removed=()):
+def remote_changed(dest, url, cookie):
+    """Did the lecturer replace this file under the same name? Moodle's date is newer than our copy, or the
+    size differs. Anything unclear (request failed, header missing) counts as not changed."""
+    import email.utils
+    r = subprocess.run(["curl", "-sfIL", "--max-time", "20", "-H", f"Cookie: {cookie}", url],
+                       capture_output=True, text=True)
+    if r.returncode:
+        return False
+    headers = {}
+    for line in r.stdout.splitlines():  # with redirects, the last response wins
+        k, _, v = line.partition(":")
+        if v:
+            headers[k.strip().lower()] = v.strip()
+    st = dest.stat()
+    size = headers.get("content-length")
+    if size and size.isdigit() and int(size) != st.st_size:
+        return True
+    try:
+        return email.utils.parsedate_to_datetime(headers["last-modified"]).timestamp() > st.st_mtime
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def replace_file(dest, url, cookie, base):
+    """Fetch the new version beside the tree, swap it in only once it's whole, and keep the old one in
+    <base>/moodle-replaced/<date>/ (outside what goes to Drive). -> 'ok', 'same' or 'FAIL'."""
+    import filecmp, shutil, time
+    tmp_dir = base / "moodle-tmp"
+    tmp_dir.mkdir(exist_ok=True)
+    tmp = tmp_dir / dest.name
+    if subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(tmp), url]).returncode \
+            or not tmp.exists() or not tmp.stat().st_size:
+        tmp.unlink(missing_ok=True)
+        return "FAIL"
+    if filecmp.cmp(tmp, dest, shallow=False):
+        tmp.unlink()
+        os.utime(dest)  # same bytes: don't ask again
+        return "same"
+    keep = base / "moodle-replaced" / time.strftime("%Y-%m-%d_%H%M") / dest.relative_to(base)
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(dest, keep)
+    os.replace(tmp, dest)
+    return "ok"
+
+
+def download(files, root, cookie, videos=False, skip_existing=False, log=None, removed=(), check=False, base=None):
     """Download outside the browser: curl streams big files instead of buffering them. -> #failed
-    log: a .jsonl path — each file fetched is appended there ({at, path, url}, path relative to its parent)."""
+    log: a .jsonl path — each new file fetched is appended there ({at, path, url}, path relative to its parent).
+    A replaced file isn't logged as new: its Drive file keeps its id, and new_moodle_files shows it by date.
+    check: only print which files were replaced on Moodle."""
     import time
     failed = 0
     for sec, url in files:
@@ -284,7 +333,19 @@ def download(files, root, cookie, videos=False, skip_existing=False, log=None, r
                 print(f"skip video\t{sec}/{name}")
             continue
         dest = root / sec / name
-        if dest in removed or skip_existing and dest.exists() and dest.stat().st_size:
+        if dest in removed:
+            continue
+        if skip_existing and dest.exists() and dest.stat().st_size:
+            if not remote_changed(dest, url, cookie):
+                continue
+            if check:
+                print(f"would replace\t{sec}/{name}")
+                continue
+            result = replace_file(dest, url, cookie, base)
+            failed += result == "FAIL"
+            print(f"replaced {result}\t{sec}/{name}")
+            continue
+        if check:
             continue
         dest.parent.mkdir(parents=True, exist_ok=True)
         ok = subprocess.run(["curl", "-sfL", "-H", f"Cookie: {cookie}", "-o", str(dest), url]).returncode == 0
@@ -308,6 +369,7 @@ def main():
     p = sub.add_parser("sync")
     p.add_argument("dir")
     p.add_argument("--videos", action="store_true")
+    p.add_argument("--check", action="store_true", help="only list files replaced on Moodle; change nothing")
     p = sub.add_parser("recordings")
     p.add_argument("course", nargs="?", default="")
     args = ap.parse_args()
@@ -378,7 +440,7 @@ def main():
     removed = {root / l.strip() for l in rm_list.read_text(encoding="utf-8").splitlines() if l.strip()} \
         if args.cmd == "sync" and rm_list.exists() else set()
     failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync", log=log,
-                          removed=removed)
+                          removed=removed, check=getattr(args, "check", False), base=root.parent)
                  for sub_dir, files in todo)
     sys.exit(1 if failed else 0)
 
