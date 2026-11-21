@@ -33,10 +33,26 @@ def link_for(code, today, data):
     return None
 
 
+def _log_sent(chat, text, src):
+    """Append to the shared log of every Telegram alert, ~/logs/telegram-sent.jsonl
+    (one JSON line per message, all senders on zima1). Never breaks a send."""
+    try:
+        import json as _j, os as _o, datetime as _d
+        p = _o.path.expanduser("~/logs/telegram-sent.jsonl")
+        _o.makedirs(_o.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(_j.dumps({"ts": _d.datetime.now().isoformat(timespec="seconds"),
+                              "src": src, "chat": str(chat), "text": text},
+                             ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def send(text):
     tok = (pathlib.Path.home() / ".telegram_bot_token").read_text().strip()
     body = urllib.parse.urlencode({"chat_id": CHAT, "text": text, "disable_web_page_preview": "true"}).encode()
     urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", body, timeout=20).read()
+    _log_sent(CHAT, text, "zoom-alert")
 
 
 def main():
