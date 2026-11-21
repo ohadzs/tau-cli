@@ -2,7 +2,8 @@
 # moodle-sync.sh — daily on zima1 (cron 06:00): every Moodle course's files -> Google Drive.
 # moodle.py fetches only files not yet in $LOCAL; `rclone copy` then adds/updates in Drive
 # and never deletes, so anything added there by hand (transcripts) stays.
-# On failure: Telegram DM via ~/bin/tg-notify.
+# On failure: Telegram DM via ~/bin/tg-notify, but only after 3 failed runs in a row
+# (TAU's Moodle/DNS blips for an hour every few days and fixes itself).
 set -uo pipefail
 cd "$(dirname "$0")"
 LOCAL="${MOODLE_LOCAL:-$HOME/tau-cli/data/moodle}"
@@ -26,7 +27,16 @@ if "$RCLONE" lsjson -R --files-only "$DEST" > "$drive_map.tmp" 2>/dev/null; then
 else
   rm -f "$drive_map.tmp"
 fi
+STREAK_FILE="$HOME/tau-cli/data/.moodle-fail-streak"
+STREAK_MAX="${MOODLE_ALERT_STREAK:-3}"
 if [ -n "$fail" ]; then
-  echo "FAILED: $fail"
-  ~/bin/tg-notify "Moodle → Drive failed" "$fail — see ~/tau-cli/data/moodle-sync.log on zima1"
+  n=$(( $(cat "$STREAK_FILE" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$STREAK_FILE"
+  echo "FAILED ($n in a row): $fail"
+  # Alert once, when the streak first reaches the threshold - not every hour after.
+  if [ "$n" -eq "$STREAK_MAX" ]; then
+    ~/bin/tg-notify "Moodle → Drive failed" "$n runs in a row. Last: $fail — see ~/tau-cli/data/moodle-sync.log on zima1"
+  fi
+else
+  rm -f "$STREAK_FILE"
 fi
