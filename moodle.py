@@ -8,6 +8,7 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py pull <course-id> <dir> [--videos]
     .venv/bin/python moodle.py sync <dir> [--videos]
     .venv/bin/python moodle.py recordings [course]
+    .venv/bin/python moodle.py links [course]
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
 there yet, or that the lecturer replaced under the same name (the old copy goes to
@@ -16,7 +17,9 @@ writes <dir>/../moodle-deadlines.json (every assignment due date + whether it's 
 'no_box': homework sheets posted before any submission box exists) and appends
 each newly fetched file to <dir>/../moodle-new.jsonl — the study page's sync (ohadzvishaboo
 sync/study_sync.py) reads both. It also writes <dir>/../moodle-zoom.json: every meeting in each course's
-Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it.
+Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads it — and
+<dir>/../moodle-links.json: every non-file link per course (mod/url resolved to its target, links in labels and
+section summaries; {name, url, kind, section, cmid}) — ohad-mcp's learning tracks read it. Quiz pages are never opened.
 Files Ohad deleted on purpose (e.g. a superseded homework sheet) are listed in <dir>/../moodle-removed.txt,
 one path per line relative to <dir> — sync never fetches them again.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
@@ -143,6 +146,55 @@ def course_files(ctx, page, course_id, sheets=None):
         if m and sheets is not None:
             sheets.append({"number": int(m.group(1)), "name": it["name"].strip(), "url": it["href"], "box": False,
                            "path": f"{sec}/{file_name(url)}"})
+    return out
+
+
+def course_links(ctx, page, course_id):
+    """Every link the lecturer posted that isn't a file: URL activities (mod/url, resolved to where they point),
+    links inside text-and-media labels, and links in section summaries. Read-only: one GET per mod/url, without
+    following the redirect; quiz pages are never opened (or listed). Expects the course page already loaded
+    (course_files leaves it there).
+    -> [{name, url, kind: url|label|section, section, cmid}]"""
+    if f"id={course_id}" not in page.url:
+        page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
+        page.wait_for_timeout(4000)
+    items = page.evaluate("""() => {
+        const secName = el => { const s = el.closest('li.section,[data-for=section]');
+            return s ? ((s.querySelector('.sectionname,h3') || {}).innerText || '').trim() : ''; };
+        const out = [];
+        document.querySelectorAll('li.activity.modtype_url').forEach(a => {
+            const l = a.querySelector('a[href*="/mod/url/view.php"]');
+            if (l) out.push({kind: 'url', href: l.href, sec: secName(a),
+                name: ((a.querySelector('.instancename,.activityname') || {}).innerText || l.innerText || '').trim().split('\\n')[0]});
+        });
+        const ext = (sel, kind) => document.querySelectorAll(sel).forEach(a => out.push({kind, href: a.href, sec: secName(a),
+            name: (a.innerText || a.title || '').trim().replace(/\\s+/g, ' ')}));
+        ext('li.activity.modtype_label a[href], li.activity.label a[href]', 'label');
+        ext('li.section .summary a[href], [data-for=section] .summarytext a[href], [data-for=sectioninfo] a[href]', 'section');
+        return out;
+    }""")
+    out, seen = [], set()
+    for it in items:
+        href = it["href"]
+        if not href.startswith("http") or "/mod/quiz/" in href or href in seen:
+            continue
+        seen.add(href)
+        row = {"name": it["name"], "url": href, "kind": it["kind"], "section": it["sec"] or "כללי", "cmid": None}
+        if it["kind"] == "url":
+            row["cmid"] = int(urllib.parse.parse_qs(urllib.parse.urlsplit(href).query).get("id", ["0"])[0]) or None
+            try:
+                r = ctx.request.get(href, max_redirects=0)
+                target = r.headers.get("location")
+                if not target:   # "click to open" page: the link sits in .urlworkaround
+                    m = re.search(r'class="urlworkaround"[^>]*>.*?href="([^"]+)"', r.text(), re.S)
+                    target = m.group(1).replace("&amp;", "&") if m else ""
+                if target and "/mod/quiz/" not in target:
+                    row["url"] = target
+            except Exception as e:
+                print(f"link FAIL\t{course_id}\t{href}\t{e}")
+        elif "moodle.tau.ac.il" in href and "/pluginfile.php/" not in href:
+            continue   # in-Moodle navigation inside a label (another activity, the forum) — not enrichment
+        out.append(row)
     return out
 
 
@@ -370,6 +422,8 @@ def main():
     p.add_argument("dir")
     p.add_argument("--videos", action="store_true")
     p.add_argument("--check", action="store_true", help="only list files replaced on Moodle; change nothing")
+    p = sub.add_parser("links")
+    p.add_argument("course", nargs="?", default="")
     p = sub.add_parser("recordings")
     p.add_argument("course", nargs="?", default="")
     args = ap.parse_args()
@@ -394,6 +448,12 @@ def main():
                 for c in courses(page):
                     print(f'{c["id"]}\t{c["fullname"]}\t{c.get("coursecategory", "")}')
                 return
+            if args.cmd == "links":
+                for c in courses(page):
+                    if args.course in c["fullname"]:
+                        for l in course_links(ctx, page, c["id"]):
+                            print(f'{course_dir_name(c)}\t{l["section"]}\t{l["kind"]}\t{l["name"]}\t{l["url"]}')
+                return
             if args.cmd == "recordings":
                 for c in courses(page):
                     if args.course in c["fullname"]:
@@ -402,10 +462,15 @@ def main():
                 return
             if args.cmd == "sync":
                 cs = courses(page)
-                todo, sheets = [], []
+                todo, sheets, links = [], [], []
                 for c in cs:
                     found = []
                     todo.append((course_dir_name(c), course_files(ctx, page, c["id"], found)))
+                    try:  # links are a side-trip too: never cost the file sync
+                        links.append({"id": c["id"], "code": course_code(c), "dir": course_dir_name(c),
+                                      "links": course_links(ctx, page, c["id"])})
+                    except Exception as e:
+                        print(f"links FAIL\t{c['id']}\t{e}")
                     sheets += [{**s, "course": c["id"], "path": f"{course_dir_name(c)}/{s['path']}"} for s in found]
                 try:  # never let the deadlines side-trip cost the file sync
                     assignments = deadlines(page)
@@ -417,6 +482,10 @@ def main():
                     out.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception as e:
                     print(f"deadlines FAIL\t{e}")
+                if links:
+                    out = pathlib.Path(args.dir).parent / "moodle-links.json"
+                    out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": links},
+                                              ensure_ascii=False, indent=1), encoding="utf-8")
                 zm = []
                 for c in cs:  # same: a Zoom page that won't load costs only its own course
                     try:
