@@ -9,6 +9,7 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py sync <dir> [--videos]
     .venv/bin/python moodle.py recordings [course]
     .venv/bin/python moodle.py links [course]
+    .venv/bin/python moodle.py panopto-cookies <file>
 
 `sync` pulls every enrolled course into <dir>/<course name>/ and only fetches files that aren't
 there yet, or that the lecturer replaced under the same name (the old copy goes to
@@ -25,7 +26,11 @@ one path per line relative to <dir> — sync never fetches them again.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 `recordings` reads the Panopto block on each course page live (lecture + recitation recordings, title + viewer link);
-[course] = part of the course name or number.
+[course] = part of the course name or number. `sync` also writes the same list for every course to
+<dir>/../moodle-recordings.json ({at, courses: [{id, code, dir, recordings: [{title, url}]}]}) — ohad-mcp's
+transcribe tool picks "the last lecture in X" from it.
+`panopto-cookies <file>` signs in to Moodle, then to TAU's Panopto through its Moodle provider, and writes the
+Panopto cookies as a Netscape cookies file (mode 600) — yt-dlp / `transcribe` take it to download a recording.
 """
 
 import argparse
@@ -321,6 +326,36 @@ def recordings(page, course_id):
         .map(a => [a.href, a.innerText.trim()])).entries()].map(([u, t]) => [t, u])""")
 
 
+PANOPTO = "https://tau.cloud.panopto.eu"
+
+
+def panopto_cookies(ctx, page, out):
+    """Panopto has its own login page with a provider list ("Academic Year 2026/2027" = Moodle2026); picking the
+    current Moodle provider bounces through the already signed-in Moodle and back. Writes the tau.cloud.panopto.eu
+    cookies (.ASPXAUTH is the one that matters) as a Netscape cookies file."""
+    provider = "Moodle" + re.search(r"/(\d{4})/", SSO_START).group(1)
+    page.goto(f"{PANOPTO}/Panopto/Pages/Auth/Login.aspx?ReturnUrl=%2fPanopto%2fPages%2fSessions%2fList.aspx",
+              wait_until="domcontentloaded", timeout=60_000)
+    page.select_option("#providerDropdown", provider)
+    page.click("#PageContentPlaceholder_loginControl_externalLoginButton")
+    page.wait_for_url("**/Sessions/List.aspx**", timeout=60_000)
+    cks = [c for c in ctx.cookies() if "panopto" in c["domain"]]
+    if not any(c["name"] == ".ASPXAUTH" for c in cks):
+        sys.exit("Panopto sign-in did not produce .ASPXAUTH")
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in cks:
+        d = c["domain"]
+        lines.append("\t".join([d, "TRUE" if d.startswith(".") else "FALSE", c["path"],
+                                "TRUE" if c["secure"] else "FALSE", str(int(c["expires"]) if c["expires"] > 0 else 0),
+                                c["name"], c["value"]]))
+    out = pathlib.Path(out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.touch(mode=0o600)
+    out.chmod(0o600)
+    out.write_text("\n".join(lines) + "\n")
+    print(f"wrote {len(cks)} Panopto cookies to {out}")
+
+
 def course_dir_name(course):
     """'0321110001 - אלגברה לינארית לפיזיקה' -> 'אלגברה לינארית לפיזיקה' (the Drive folder name)."""
     return re.sub(r"^\d+\s*-\s*", "", course["fullname"]).replace("/", "-").strip()
@@ -426,6 +461,8 @@ def main():
     p.add_argument("course", nargs="?", default="")
     p = sub.add_parser("recordings")
     p.add_argument("course", nargs="?", default="")
+    p = sub.add_parser("panopto-cookies")
+    p.add_argument("file")
     args = ap.parse_args()
 
     if LOGIN_BLOCK.exists():
@@ -459,6 +496,9 @@ def main():
                     if args.course in c["fullname"]:
                         for title, url in recordings(page, c["id"]):
                             print(f"{course_dir_name(c)}\t{title}\t{url}")
+                return
+            if args.cmd == "panopto-cookies":
+                panopto_cookies(ctx, page, args.file)
                 return
             if args.cmd == "sync":
                 cs = courses(page)
@@ -496,6 +536,17 @@ def main():
                 if zm:
                     out = pathlib.Path(args.dir).parent / "moodle-zoom.json"
                     out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": zm},
+                                              ensure_ascii=False, indent=1), encoding="utf-8")
+                recs = []
+                for c in cs:  # Panopto block, per course; a block that won't load costs only its own course
+                    try:
+                        recs.append({"id": c["id"], "code": course_code(c), "dir": course_dir_name(c),
+                                     "recordings": [{"title": t, "url": u} for t, u in recordings(page, c["id"])]})
+                    except Exception as e:
+                        print(f"recordings FAIL\t{c['id']}\t{e}")
+                if recs:
+                    out = pathlib.Path(args.dir).parent / "moodle-recordings.json"
+                    out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": recs},
                                               ensure_ascii=False, indent=1), encoding="utf-8")
             else:
                 todo = [("", course_files(ctx, page, args.course_id))]
