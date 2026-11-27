@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # moodle-sync.sh — daily on zima1 (cron 06:00): every Moodle course's files -> Google Drive.
 # moodle.py fetches only files not yet in $LOCAL; `rclone copy` then adds/updates in Drive
-# and never deletes, so anything added there by hand (transcripts) stays.
+# and never deletes on its own — only files moodle.py lists as gone from Moodle get trashed; hand-made ones stay.
 # On failure: Telegram DM via ~/bin/tg-notify, but only after 3 failed runs in a row
 # (TAU's Moodle/DNS blips for an hour every few days and fixes itself).
 set -uo pipefail
@@ -17,6 +17,23 @@ python3 moodle.py sync "$LOCAL" || fail="moodle.py sync exited $?"
 out=$("$RCLONE" copy "$LOCAL" "$DEST" --stats-one-line -v 2>&1) \
   || fail="${fail:+$fail; }rclone copy failed"
 grep -E "Copied|ERROR" <<<"$out" || true
+# Files the lecturer took off Moodle: moodle.py already moved them out of $LOCAL; drop them in Drive too
+# (Drive trash, so 30 days to undo). A line that fails stays for the next run.
+pruned="$LOCAL/../moodle-pruned.txt"
+if [ -s "$pruned" ]; then
+  left=""
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    if "$RCLONE" deletefile "$DEST/$rel" --drive-use-trash 2>/dev/null; then
+      echo "trashed in Drive: $rel"
+    elif [ -z "$("$RCLONE" lsf "$DEST/$rel" 2>/dev/null)" ]; then
+      echo "already gone in Drive: $rel"
+    else
+      left+="$rel"$'\n'
+    fi
+  done < "$pruned"
+  printf '%s' "$left" > "$pruned"
+fi
 # Transcripts are made by hand and live only in Drive: copy them down so the course-file tools can read them.
 # One way and adds only. Keeps Drive's timestamps, so the upload above sees nothing new.
 "$RCLONE" copy "$DEST" "$LOCAL" --include "*תמלול*" 2>&1 | grep -E "ERROR" || true

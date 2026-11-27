@@ -23,6 +23,8 @@ Zoom LTI activity (start, join URL with passcode) — ohad-mcp's zoom_link reads
 section summaries; {name, url, kind, section, cmid}) — ohad-mcp's learning tracks read it. Quiz pages are never opened.
 Files Ohad deleted on purpose (e.g. a superseded homework sheet) are listed in <dir>/../moodle-removed.txt,
 one path per line relative to <dir> — sync never fetches them again.
+A file the lecturer took off Moodle leaves the mirror after 3 runs in a row missing (see prune()): kept in
+<dir>/../moodle-replaced/, listed in <dir>/../moodle-pruned.txt for moodle-sync.sh to trash in Drive.
 `pull` keeps Moodle's section layout (one folder per section, a subfolder per Moodle folder). Lecture videos run
 ~0.3–0.7 GB each, so they're skipped unless --videos.
 `recordings` reads the Panopto block on each course page live (lecture + recitation recordings, title + viewer link);
@@ -445,6 +447,55 @@ def download(files, root, cookie, videos=False, skip_existing=False, log=None, r
     return failed
 
 
+PRUNE_AFTER = 3        # hourly runs in a row a file must be missing from Moodle before it goes
+PRUNE_MAX_SHARE = 0.5  # more than this share of a course missing at once = a page that didn't load; touch nothing
+
+
+def prune(todo, root, base, check=False):
+    """Files the lecturer took off Moodle (e.g. a homework sheet re-posted under a new name) leave the mirror too.
+    A local file under a current course folder that Moodle no longer lists for PRUNE_AFTER runs in a row is moved
+    to <base>/moodle-replaced/<date>/ and its path (relative to root) appended to <base>/moodle-pruned.txt;
+    moodle-sync.sh then deletes it in Drive (Drive's trash, 30 days). Transcripts (made by hand) are never touched.
+    check: only print what's missing; state is left alone."""
+    import shutil, time
+    state_f = base / "moodle-missing.json"
+    try:
+        state = json.loads(state_f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    new_state, gone = {}, []
+    for sub_dir, files in todo:
+        course = root / sub_dir
+        if not files or not course.is_dir():
+            continue  # an empty list is a page that didn't load, not a course emptied out
+        listed = {course / sec / file_name(url) for sec, url in files}
+        local = [p for p in course.rglob("*") if p.is_file() and "תמלול" not in p.name]
+        missing = [p for p in local if p not in listed]
+        if len(missing) > PRUNE_MAX_SHARE * max(len(local), 1):
+            print(f"prune skip\t{sub_dir}: {len(missing)}/{len(local)} files missing — looks like a bad page load")
+            continue
+        for p in missing:
+            rel = str(p.relative_to(root))
+            n = state.get(rel, 0) + 1
+            if check:
+                print(f"missing on Moodle ({n}/{PRUNE_AFTER})\t{rel}")
+                continue
+            if n < PRUNE_AFTER:
+                new_state[rel] = n
+                continue
+            keep = base / "moodle-replaced" / time.strftime("%Y-%m-%d_%H%M") / root.name / rel
+            keep.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(p), keep)
+            gone.append(rel)
+            print(f"gone from Moodle\t{rel}")
+    if check:
+        return
+    state_f.write_text(json.dumps(new_state, ensure_ascii=False, indent=1), encoding="utf-8")
+    if gone:
+        with open(base / "moodle-pruned.txt", "a", encoding="utf-8") as f:
+            f.write("".join(r + "\n" for r in gone))
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -562,6 +613,11 @@ def main():
     failed = sum(download(files, root / sub_dir, cookie, args.videos, skip_existing=args.cmd == "sync", log=log,
                           removed=removed, check=getattr(args, "check", False), base=root.parent)
                  for sub_dir, files in todo)
+    if args.cmd == "sync":
+        try:  # cleanup never costs the sync
+            prune(todo, root, root.parent, check=args.check)
+        except Exception as e:
+            print(f"prune FAIL\t{e}")
     sys.exit(1 if failed else 0)
 
 if __name__ == "__main__":
