@@ -711,8 +711,7 @@ def main():
                         print(f"links FAIL\t{c['id']}\t{e}")
                     try:  # grades + the grader's feedback: same rule, and its files download with the course's
                         g, fb_files = grades(page, c, dirs)
-                        if g["items"] or g["total"]:
-                            marks.append(g)
+                        marks.append(g)
                         files += [f for f in fb_files if f not in files]
                     except Exception as e:
                         print(f"grades FAIL\t{c['id']}\t{e}")
@@ -735,6 +734,8 @@ def main():
                         tot = {}
                     for g in marks:
                         g["overview_total"] = tot.get(g["id"])
+                    # a course with no report and no total (exam archive, a training) isn't graded
+                    marks = [g for g in marks if g["items"] or g["total"] or g["overview_total"] not in (None, "-", "")]
                     out = pathlib.Path(args.dir).parent / "moodle-grades.json"
                     out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": marks},
                                               ensure_ascii=False, indent=1), encoding="utf-8")
