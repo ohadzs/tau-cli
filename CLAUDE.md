@@ -61,7 +61,7 @@ Playwright drives the system Chrome (`channel="chrome"`), not its own bundled Ch
 
 **Daily sync on zima1** (clone `/home/ohad/tau-cli`): cron 06:00 runs `moodle-sync.sh` =
 `moodle.py sync data/moodle` (every course, new files only, no videos) + `rclone copy` to Drive
-`אוניברסיטה/` (never deletes). Off macOS the password comes from `~/.config/tau/password` (600).
+`אוניברסיטה/`. A file taken off Moodle (missing 3 runs in a row) leaves the mirror: local copy → `data/moodle-replaced/`, Drive copy → Drive trash. Nothing else is ever deleted. Off macOS the password comes from `~/.config/tau/password` (600).
 A failed login drops `~/.config/tau/login-blocked` and every later run refuses to log in until
 it's removed — the lockout guard. Failure → Telegram DM. The tool only ever opens
 `/mod/resource/` and `/mod/folder/` links — never quiz/assign pages; keep it that way.
