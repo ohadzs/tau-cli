@@ -7,6 +7,7 @@ Credentials come from the same place as `tau` (Keychain `tau` + ~/.config/tau/{u
     .venv/bin/python moodle.py courses
     .venv/bin/python moodle.py pull <course-id> <dir> [--videos]
     .venv/bin/python moodle.py sync <dir> [--videos]
+    .venv/bin/python moodle.py grades [course]
     .venv/bin/python moodle.py recordings [course]
     .venv/bin/python moodle.py links [course]
     .venv/bin/python moodle.py panopto-cookies <file>
@@ -31,6 +32,11 @@ A file the lecturer took off Moodle leaves the mirror after 3 runs in a row miss
 [course] = part of the course name or number. `sync` also writes the same list for every course to
 <dir>/../moodle-recordings.json ({at, courses: [{id, code, dir, recordings: [{title, url}]}]}) — ohad-mcp's
 transcribe tool picks "the last lecture in X" from it.
+`sync` also writes <dir>/../moodle-grades.json: per course its user grade report (every item: grade, max, percent,
+weight, the report's feedback) + for each assignment the feedback box on its read-only view.php (graded at/by, the
+grader's comment, feedback files). The grader's files (annotated PDF) download into <assignment folder>/משוב/ and so
+reach Drive; prune() never touches them. Quiz pages are never opened — quiz grades come from the report.
+`grades [course]` prints the same live.
 `panopto-cookies <file>` signs in to Moodle, then to TAU's Panopto through its Moodle provider, and writes the
 Panopto cookies as a Netscape cookies file (mode 600) — yt-dlp / `transcribe` take it to download a recording.
 """
@@ -99,10 +105,13 @@ def file_name(url):
     return urllib.parse.unquote(url.split("?")[0].rsplit("/", 1)[-1]).strip()
 
 
-def course_files(ctx, page, course_id, sheets=None):
+def course_files(ctx, page, course_id, sheets=None, assign_dirs=None):
     """-> [(section path, pluginfile-url)] for every file, folder and assignment attachment on the course page.
     sheets: a list to append this course's homework sheets to ({number, name, url, path, box}, path relative
-    to the course folder; box = the sheet is attached to the submission box itself)."""
+    to the course folder; box = the sheet is attached to the submission box itself).
+    assign_dirs: a dict to fill with {assignment cmid: its folder, relative to the course folder} — grades()
+    puts the grader's feedback files in <that folder>/משוב/. Feedback files are left to grades(): the
+    annotated PDF has the same name as his submission and would land on top of it."""
     page.goto(COURSE_URL.format(course_id), wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
     items = page.evaluate("""() => [...document.querySelectorAll('li.activity')].map(a => {
@@ -131,7 +140,12 @@ def course_files(ctx, page, course_id, sheets=None):
                 links = [m.replace("&amp;", "&") for m in
                          re.findall(r'https://moodle\.tau\.ac\.il/pluginfile\.php/[^"\'<> ]+', html)]
             name = re.sub(r"\s+", " ", it["name"]).replace("/", "-") or "תיקייה"
+            links = [u for u in links if "/assignfeedback_" not in u]
             out += [(f"{sec}/{name}", u) for u in dict.fromkeys(links)]
+            if it["assign"] and it["href"] and assign_dirs is not None:
+                cm = urllib.parse.parse_qs(urllib.parse.urlsplit(it["href"]).query).get("id", [""])[0]
+                if cm.isdigit():
+                    assign_dirs[int(cm)] = f"{sec}/{name}"
             num = re.search(r"\d+", name)
             mine = [u for u in links if "assignsubmission" not in u]   # not his own hand-in
             if it["assign"] and num and mine and sheets is not None:
@@ -273,6 +287,127 @@ def submitted(page, url):
     'submissionstatussubmitted' class on the status cell (any language)."""
     r = page.context.request.get(url)
     return r.ok and "submissionstatussubmitted" in r.text()
+
+
+GRADE_REPORT = "https://moodle.tau.ac.il/grade/report/user/index.php?id={}"
+FEEDBACK_DIR = "משוב"   # the grader's files sit in <assignment folder>/משוב/ — prune() never touches them
+HE_MONTHS = {m: i + 1 for i, m in enumerate(["ינואר", "פברואר", "מרץ", "אפריל", "מאי", "יוני", "יולי", "אוגוסט",
+                                             "ספטמבר", "אוקטובר", "נובמבר", "דצמבר"])}
+
+
+def _num(s):
+    try:
+        return float(s.replace(",", ""))
+    except (AttributeError, ValueError):
+        return None
+
+
+def _he_date(s):
+    """'יום רביעי, 11 נובמבר 2026, 17:00' -> '2026-11-11 17:00' (Israel time, as Moodle shows it); else as is."""
+    m = re.search(r"(\d{1,2})\s+(\S+)\s+(\d{4}),\s*(\d{1,2}:\d{2})", s or "")
+    if not m or m.group(2) not in HE_MONTHS:
+        return s or ""
+    return f"{m.group(3)}-{HE_MONTHS[m.group(2)]:02d}-{int(m.group(1)):02d} {int(m.group(4)[:-3]):02d}{m.group(4)[-3:]}"
+
+
+def overview_totals(page):
+    """{course id: course total as the overview report shows it ('87.65', '-')} — it can show a total whose items
+    the course hides from the user report."""
+    page.goto("https://moodle.tau.ac.il/grade/report/overview/index.php", wait_until="domcontentloaded")
+    page.wait_for_timeout(2000)
+    rows = page.evaluate("""() => [...document.querySelectorAll('table tr')].map(tr => {
+        const a = tr.querySelector('a[href*="id="]');
+        return a && tr.cells.length > 1 ? [new URL(a.href).searchParams.get('id'), tr.cells[1].textContent.trim()] : null;
+      }).filter(Boolean)""")
+    return {int(i): g for i, g in rows if i and i.isdigit()}
+
+
+def assignment_feedback(page, url):
+    """The 'משוב' box on a read-only mod/assign/view.php: grade, when, by whom, the comment (full text, not the
+    folded summary) and the grader's files (annotated PDF / feedback files). Parsed with DOMParser — no scripts run."""
+    html = page.context.request.get(url).text()
+    return page.evaluate("""(html) => {
+      const d = new DOMParser().parseFromString(html, 'text/html');
+      const box = d.querySelector('.feedback');
+      if (!box) return null;
+      const out = {grade: '', graded_at: '', graded_by: '', comments: '', files: []};
+      box.querySelectorAll('tr').forEach(tr => {
+        const th = tr.querySelector('th'), td = tr.querySelector('td');
+        if (!th || !td) return;
+        const label = th.textContent.trim();
+        if (td.querySelector('[class*="assignfeedback_comments"]')) {
+          const el = td.querySelector('[class*="full_assignfeedback_comments"]') ||
+                     td.querySelector('[class*="summary_assignfeedback_comments"]');
+          // keep the grader's line breaks: <br>, </p>, </li> -> newline, then plain text
+          const t = d.createElement('div');
+          t.innerHTML = el.innerHTML.replace(/<br\\s*\\/?>|<\\/p>|<\\/li>/gi, '\\n');
+          out.comments = t.textContent.split('\\n').map(s => s.trim()).filter(Boolean).join('\\n');
+        } else if (/^ציון|^Grade/.test(label)) out.grade = td.textContent.replace(/\\s+/g, ' ').trim();
+        else if (/נבדק ב|Graded on/.test(label)) out.graded_at = td.textContent.trim();
+        else if (/נבדק על|Graded by/.test(label))
+          out.graded_by = [...td.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim();
+      });
+      out.files = [...new Set([...box.querySelectorAll('a[href*="/assignfeedback_"]')].map(a => a.href))];
+      return out;
+    }""", html)
+
+
+def grades(page, course, assign_dirs):
+    """Read-only: the course's user grade report (every grade item: grade, range, weight, the report's feedback
+    column) + for each assignment the feedback box on its own page. Quiz items come from the report only —
+    quiz pages are never opened.
+    -> ({id, code, dir, total, items: [...]}, [(section path, feedback-file url)]) — the second goes to download()
+    with the course's other files; paths in items are relative to the moodle/ folder."""
+    page.goto(GRADE_REPORT.format(course["id"]), wait_until="domcontentloaded")
+    page.wait_for_timeout(2000)
+    rows = page.evaluate("""() => [...document.querySelectorAll('table.user-grade tr')].map(tr => {
+        const th = tr.querySelector('th.column-itemname');
+        if (!th || th.classList.contains('category')) return null;
+        const cols = {};
+        tr.querySelectorAll('td[class*="column-"]').forEach(td => {
+          const c = [...td.classList].find(k => k.startsWith('column-'));
+          cols[c.slice(7)] = td.textContent.replace(/\\s+/g, ' ').trim();
+        });
+        const a = th.querySelector('a[href]');
+        return {name: (th.querySelector('.gradeitemheader,.rowtitle') || th).textContent.trim(),
+                type: (th.querySelector('span.small') || {}).textContent || '',
+                total: th.classList.contains('baggt') || !!th.querySelector('.courseitem'),
+                url: a ? a.href : '', cols};
+      }).filter(Boolean)""")
+    cdir = course_dir_name(course)
+    items, files, total = [], [], None
+    for r in rows:
+        c = r["cols"]
+        if not c:   # the header row
+            continue
+        grade = c.get("grade", "")
+        lo, _, hi = c.get("range", "").replace("–", "-").partition("-")
+        mx = _num(hi)
+        if r["total"]:
+            if total is None:   # the first aggregate row is the course total (category subtotals come after)
+                total = {"grade": grade, "max": mx, "percent": c.get("percentage")}
+            continue
+        g = _num(grade)
+        pct = c.get("percentage") or (f"{round(100 * g / mx, 1)} %" if g is not None and mx else None)
+        cm = urllib.parse.parse_qs(urllib.parse.urlsplit(r["url"]).query).get("id", [""])[0]
+        it = {"name": r["name"], "type": r["type"].strip(), "url": r["url"],
+              "cmid": int(cm) if cm.isdigit() else None, "grade": grade if grade not in ("", "-") else None,
+              "max": mx, "percent": pct, "weight": c.get("weight"),
+              "feedback": c.get("feedback") or "", "graded_at": "", "graded_by": "", "comments": "", "files": []}
+        if "/mod/assign/" in r["url"]:
+            try:
+                fb = assignment_feedback(page, r["url"])
+            except Exception as e:
+                print(f"feedback FAIL\t{course['id']}\t{r['name']}\t{e}")
+                fb = None
+            if fb:
+                it.update(graded_at=_he_date(fb["graded_at"]), graded_by=fb["graded_by"], comments=fb["comments"])
+                folder = assign_dirs.get(it["cmid"]) or f"ציונים ומשובים/{r['name'].replace('/', '-')}"
+                for u in fb["files"]:
+                    files.append((f"{folder}/{FEEDBACK_DIR}", u))
+                    it["files"].append(f"{cdir}/{folder}/{FEEDBACK_DIR}/{file_name(u)}")
+        items.append(it)
+    return {"id": course["id"], "code": course_code(course), "dir": cdir, "total": total, "items": items}, files
 
 
 def zoom(page, course_id):
@@ -469,7 +604,8 @@ def prune(todo, root, base, check=False):
         if not files or not course.is_dir():
             continue  # an empty list is a page that didn't load, not a course emptied out
         listed = {course / sec / file_name(url) for sec, url in files}
-        local = [p for p in course.rglob("*") if p.is_file() and "תמלול" not in p.name]
+        local = [p for p in course.rglob("*") if p.is_file() and "תמלול" not in p.name
+                 and FEEDBACK_DIR not in p.relative_to(course).parts]   # grader feedback stays
         missing = [p for p in local if p not in listed]
         if len(missing) > PRUNE_MAX_SHARE * max(len(local), 1):
             print(f"prune skip\t{sub_dir}: {len(missing)}/{len(local)} files missing — looks like a bad page load")
@@ -510,6 +646,8 @@ def main():
     p.add_argument("--check", action="store_true", help="only list files replaced on Moodle; change nothing")
     p = sub.add_parser("links")
     p.add_argument("course", nargs="?", default="")
+    p = sub.add_parser("grades")
+    p.add_argument("course", nargs="?", default="")
     p = sub.add_parser("recordings")
     p.add_argument("course", nargs="?", default="")
     p = sub.add_parser("panopto-cookies")
@@ -542,6 +680,14 @@ def main():
                         for l in course_links(ctx, page, c["id"]):
                             print(f'{course_dir_name(c)}\t{l["section"]}\t{l["kind"]}\t{l["name"]}\t{l["url"]}')
                 return
+            if args.cmd == "grades":
+                for c in courses(page):
+                    if args.course in c["fullname"]:
+                        dirs = {}
+                        course_files(ctx, page, c["id"], None, dirs)
+                        g, _ = grades(page, c, dirs)
+                        print(json.dumps(g, ensure_ascii=False, indent=1))
+                return
             if args.cmd == "recordings":
                 for c in courses(page):
                     if args.course in c["fullname"]:
@@ -553,15 +699,23 @@ def main():
                 return
             if args.cmd == "sync":
                 cs = courses(page)
-                todo, sheets, links = [], [], []
+                todo, sheets, links, marks = [], [], [], []
                 for c in cs:
-                    found = []
-                    todo.append((course_dir_name(c), course_files(ctx, page, c["id"], found)))
+                    found, dirs = [], {}
+                    files = course_files(ctx, page, c["id"], found, dirs)
+                    todo.append((course_dir_name(c), files))
                     try:  # links are a side-trip too: never cost the file sync
                         links.append({"id": c["id"], "code": course_code(c), "dir": course_dir_name(c),
                                       "links": course_links(ctx, page, c["id"])})
                     except Exception as e:
                         print(f"links FAIL\t{c['id']}\t{e}")
+                    try:  # grades + the grader's feedback: same rule, and its files download with the course's
+                        g, fb_files = grades(page, c, dirs)
+                        if g["items"] or g["total"]:
+                            marks.append(g)
+                        files += [f for f in fb_files if f not in files]
+                    except Exception as e:
+                        print(f"grades FAIL\t{c['id']}\t{e}")
                     sheets += [{**s, "course": c["id"], "path": f"{course_dir_name(c)}/{s['path']}"} for s in found]
                 try:  # never let the deadlines side-trip cost the file sync
                     assignments = deadlines(page)
@@ -573,6 +727,17 @@ def main():
                     out.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
                 except Exception as e:
                     print(f"deadlines FAIL\t{e}")
+                if marks:
+                    try:
+                        tot = overview_totals(page)
+                    except Exception as e:
+                        print(f"grades overview FAIL\t{e}")
+                        tot = {}
+                    for g in marks:
+                        g["overview_total"] = tot.get(g["id"])
+                    out = pathlib.Path(args.dir).parent / "moodle-grades.json"
+                    out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": marks},
+                                              ensure_ascii=False, indent=1), encoding="utf-8")
                 if links:
                     out = pathlib.Path(args.dir).parent / "moodle-links.json"
                     out.write_text(json.dumps({"at": int(__import__("time").time()), "courses": links},

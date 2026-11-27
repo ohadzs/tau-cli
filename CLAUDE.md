@@ -64,12 +64,19 @@ Playwright drives the system Chrome (`channel="chrome"`), not its own bundled Ch
 `אוניברסיטה/`. A file taken off Moodle (missing 3 runs in a row) leaves the mirror: local copy → `data/moodle-replaced/`, Drive copy → Drive trash. Nothing else is ever deleted. Off macOS the password comes from `~/.config/tau/password` (600).
 A failed login drops `~/.config/tau/login-blocked` and every later run refuses to log in until
 it's removed — the lockout guard. Failure → Telegram DM. The tool only ever opens
-`/mod/resource/` and `/mod/folder/` links — never quiz/assign pages; keep it that way.
+`/mod/resource/` and `/mod/folder/` links — never quiz pages (assign pages read-only: deadlines, grades); keep it that way.
 In the same login `sync` also writes `data/moodle-deadlines.json` — every assignment due date from
 Moodle's own calendar ajax (`core_calendar_get_calendar_monthly_view`, read-only; an event with no
 `action` = submitted, confirmed on the read-only `mod/assign/view.php` since an assignment not yet open
 to him has no action either) — and appends each newly fetched file to `data/moodle-new.jsonl`. Both
 feed the study page's sync (ohadzvishaboo `sync/study_sync.py`, cron on zima1).
+
+**Grades + feedback:** `sync` also writes `data/moodle-grades.json` — per course the user grade report
+(`grade/report/user/index.php?id=`, every item: grade, max, percent, weight, feedback column) + the overview
+report's course total, and for each assignment the "משוב" box on its read-only `mod/assign/view.php`
+(graded at/by, full comment, feedback files). The grader's files (annotated PDF = `assignfeedback_editpdf`, same
+name as his submission) download into `<assignment folder>/משוב/`, so they reach Drive; `prune()` never touches
+that folder. Quiz grades come from the report only — quiz pages stay unopened. ohad-mcp's `grades` reads it. No alerts.
 
 **Zoom links:** `sync` also opens each course's Zoom LTI activity (`launch.php?id=<lti>` →
 `applications.zoom.us/lti/rich`) and keeps the JSON its page fetches from
