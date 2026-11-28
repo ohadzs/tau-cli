@@ -98,7 +98,7 @@ def courses(page):
 
 
 # A homework sheet posted as a file: "תרגיל בית 2", "שיעורי בית 3" — never "פתרון …" or "תרגול …".
-SHEET = re.compile(r"^(?:תרגיל(?:\s+בית)?|שיעורי\s+בית|גיליון)\s*(\d+)\s*$")
+SHEET = re.compile(r"^(?:תרגיל(?:\s+בית)?|שיעורי\s+בית|גיליון)\s*(\d+)(?:\s*[(\-–:].*)?\s*$")   # a trailing note is fine: "שיעורי בית 6 (שאלות סיכום…)"
 
 
 def file_name(url):
